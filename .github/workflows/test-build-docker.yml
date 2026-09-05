@@ -1,5 +1,21 @@
 name: Build Docker images (PR test)
 
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch with a `leg` input, so racecar can trigger a run and
+#      choose baseline vs instrumented. Upstream fires on push/PR, which racecar
+#      cannot drive.
+#   2. actions/checkout -> crashappsec/action-checkout, which wraps checkout and
+#      setup-chalk-action together. `chalk:` is the single variable separating
+#      the two arms, and `profile:` selects the observables profile.
+#   3. permissions: id-token: write for the action's OIDC connect. Declaring the
+#      block zeroes every unlisted scope, so the rest is restated.
+#   4. A fail-closed assertion on the instrumented arm.
+#   5. fail-fast: false on every matrix -- a measurement-integrity change, not a
+#      build change: the instrumented arm has strictly more failure surface, so
+#      fail-fast cancels its siblings more often than baseline's and biases the
+#      comparison.
+# Build and test COMMANDS are byte-identical to upstream.
+
 # Reusable workflow called from build.yml on PRs to verify the three
 # embedded Dockerfiles (default, ultra-lite, fat) still build cleanly,
 # optionally against a freshly-built base image when the PR touches the
@@ -7,6 +23,14 @@ name: Build Docker images (PR test)
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "run under chalk/curiosity; passed down by the calling workflow"
+        type: boolean
+        default: false
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       docker-base-changed:
         description: "Whether the docker base image changed (forwarded from files-changed)."
         required: false
@@ -20,6 +44,12 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  # A called workflow cannot read the caller's env, so the arm switch has to
+  # arrive as a workflow_call input.
+  CHALK_ON: ${{ inputs.chalk_on }}
 
 jobs:
   # A changed base image is shared by all three embedded-image builds. Build
@@ -39,7 +69,19 @@ jobs:
           egress-policy: audit
 
       - name: Checkout Repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # inert at action-checkout@main (not an input there); kept for forward-compat
+          observables_continue_on_error: false
+          # action-checkout defaults LFS on; actions/checkout does not
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Build base image locally
         run: docker build --platform linux/amd64 -t stirling-pdf-base:pr-test -f docker/base/Dockerfile docker/base
@@ -82,7 +124,19 @@ jobs:
           egress-policy: audit
 
       - name: Checkout Repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # inert at action-checkout@main (not an input there); kept for forward-compat
+          observables_continue_on_error: false
+          # action-checkout defaults LFS on; actions/checkout does not
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -222,7 +276,19 @@ jobs:
           egress-policy: audit
 
       - name: Checkout Repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # inert at action-checkout@main (not an input there); kept for forward-compat
+          observables_continue_on_error: false
+          # action-checkout defaults LFS on; actions/checkout does not
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
