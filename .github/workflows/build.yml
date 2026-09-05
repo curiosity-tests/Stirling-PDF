@@ -1,5 +1,21 @@
 name: Build and Test Workflow
 
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch with a `leg` input, so racecar can trigger a run and
+#      choose baseline vs instrumented. Upstream fires on push/PR, which racecar
+#      cannot drive.
+#   2. actions/checkout -> crashappsec/action-checkout, which wraps checkout and
+#      setup-chalk-action together. `chalk:` is the single variable separating
+#      the two arms, and `profile:` selects the observables profile.
+#   3. permissions: id-token: write for the action's OIDC connect. Declaring the
+#      block zeroes every unlisted scope, so the rest is restated.
+#   4. A fail-closed assertion on the instrumented arm.
+#   5. fail-fast: false on every matrix -- a measurement-integrity change, not a
+#      build change: the instrumented arm has strictly more failure surface, so
+#      fail-fast cancels its siblings more often than baseline's and biases the
+#      comparison.
+# Build and test COMMANDS are byte-identical to upstream.
+
 # Top-level PR / merge-queue gate. Detects which paths changed and dispatches
 # to the dedicated reusable workflows under .github/workflows/. Each child
 # workflow keeps its own setup/teardown so this file stays a routing layer.
@@ -14,6 +30,20 @@ on:
   merge_group:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
 
 # cancel in-progress jobs if a new job is triggered
 # This is useful to avoid running multiple builds for the same branch if a new commit is pushed
@@ -29,6 +59,15 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
+
+run-name: "Build and Test Workflow ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
+env:
+  # The one variable that separates the arms. On baseline, action-checkout
+  # skips its Set up Chalk step entirely. The github.event_name guard keeps
+  # incidental push/PR runs uninstrumented, where inputs.leg is empty.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
 
 jobs:
   files-changed:
@@ -53,7 +92,19 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # inert at action-checkout@main (not an input there); kept for forward-compat
+          observables_continue_on_error: false
+          # action-checkout defaults LFS on; actions/checkout does not
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Check for file changes
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -74,6 +125,7 @@ jobs:
       contents: read
       security-events: write
       pull-requests: write
+      id-token: write
     uses: ./.github/workflows/backend-build.yml
     secrets: inherit
 
@@ -86,6 +138,7 @@ jobs:
     needs: [files-changed, gradle-cache-prime]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/db-migration-test.yml
     secrets: inherit
 
@@ -94,6 +147,7 @@ jobs:
     needs: [files-changed, gradle-cache-prime]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/check-openapi.yml
     secrets: inherit
 
@@ -103,6 +157,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     uses: ./.github/workflows/frontend-validation.yml
     secrets: inherit
 
@@ -115,6 +170,7 @@ jobs:
     needs: [files-changed]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/frontend-a11y.yml
     secrets: inherit
 
@@ -123,6 +179,7 @@ jobs:
     needs: [files-changed]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/e2e-stubbed.yml
     secrets: inherit
 
@@ -131,6 +188,7 @@ jobs:
     needs: [files-changed, gradle-cache-prime]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/e2e-live.yml
     secrets: inherit
 
@@ -139,6 +197,7 @@ jobs:
     needs: [files-changed, gradle-cache-prime]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/build-enterprise.yml
     secrets: inherit
     with:
@@ -149,6 +208,7 @@ jobs:
     needs: [files-changed, gradle-cache-prime]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/check-licence.yml
     secrets: inherit
 
@@ -159,6 +219,7 @@ jobs:
       actions: write
       contents: read
       checks: write
+      id-token: write
     uses: ./.github/workflows/docker-compose-tests.yml
     secrets: inherit
     with:
@@ -184,6 +245,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      id-token: write
     uses: ./.github/workflows/test-build-docker.yml
     secrets: inherit
     with:
@@ -196,6 +258,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     uses: ./.github/workflows/tauri-build.yml
     secrets: inherit
     # PR smoke build: macOS + Windows (the platforms our developers use).
@@ -214,6 +277,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     uses: ./.github/workflows/ai-engine.yml
     secrets: inherit
 
@@ -228,6 +292,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      id-token: write
     uses: ./.github/workflows/check-generated-models.yml
     secrets: inherit
     with:
@@ -237,6 +302,7 @@ jobs:
     needs: [files-changed]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/pre_commit.yml
     secrets: inherit
 
@@ -244,6 +310,7 @@ jobs:
     needs: [files-changed]
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/dependency-review.yml
     secrets: inherit
 
@@ -262,6 +329,7 @@ jobs:
       - frontend-validation
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/coverage-aggregate.yml
     secrets: inherit
     with:
