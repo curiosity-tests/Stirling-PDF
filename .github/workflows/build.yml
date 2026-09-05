@@ -54,8 +54,8 @@ on:
 # This ensures that jobs are grouped by the workflow and branch, allowing for cancellation of
 # in-progress jobs when a new commit is pushed to the same branch or a new pull request is opened.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || github.ref }}-${{ inputs.leg || github.event_name }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || github.ref }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -115,6 +115,9 @@ jobs:
   gradle-cache-prime:
     needs: [files-changed]
     uses: ./.github/workflows/gradle-cache-prime.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   build:
@@ -127,6 +130,9 @@ jobs:
       pull-requests: write
       id-token: write
     uses: ./.github/workflows/backend-build.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   db-migration-test:
@@ -140,6 +146,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/db-migration-test.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   check-generateOpenApiDocs:
@@ -149,6 +158,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/check-openapi.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   frontend-validation:
@@ -159,6 +171,9 @@ jobs:
       pull-requests: write
       id-token: write
     uses: ./.github/workflows/frontend-validation.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   # Required (in all-checks-passed). Scans the stories a branch touches in both
@@ -172,6 +187,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/frontend-a11y.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   playwright-e2e:
@@ -181,6 +199,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/e2e-stubbed.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   playwright-e2e-live:
@@ -190,6 +211,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/e2e-live.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   playwright-e2e-enterprise:
@@ -201,6 +225,8 @@ jobs:
     uses: ./.github/workflows/build-enterprise.yml
     secrets: inherit
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       use_shared_cache: true
 
   check-licence:
@@ -210,6 +236,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/check-licence.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   docker-compose-tests:
@@ -223,6 +252,8 @@ jobs:
     uses: ./.github/workflows/docker-compose-tests.yml
     secrets: inherit
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       docker-base-changed: ${{ needs.files-changed.outputs.docker-base }}
 
   test-build-docker-images:
@@ -249,6 +280,8 @@ jobs:
     uses: ./.github/workflows/test-build-docker.yml
     secrets: inherit
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       docker-base-changed: ${{ needs.files-changed.outputs.docker-base }}
       dockerfiles-changed: ${{ needs.files-changed.outputs.dockerfiles }}
 
@@ -267,6 +300,8 @@ jobs:
     # The full signed multi-OS matrix runs on release;
     # nightly still warms the Rust cache with all-OS defaults.
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       platform: windows-macos
       sign: true
       use_shared_cache: true
@@ -279,6 +314,9 @@ jobs:
       pull-requests: write
       id-token: write
     uses: ./.github/workflows/ai-engine.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   # The generated frontend types and engine tool models are both derived from
@@ -296,6 +334,8 @@ jobs:
     uses: ./.github/workflows/check-generated-models.yml
     secrets: inherit
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       use_shared_cache: true
 
   pre-commit:
@@ -304,6 +344,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/pre_commit.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   dependency-review:
@@ -312,6 +355,9 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/dependency-review.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
     secrets: inherit
 
   # Coverage aggregate: merges the JUnit + e2e:live + cucumber .exec
@@ -333,6 +379,8 @@ jobs:
     uses: ./.github/workflows/coverage-aggregate.yml
     secrets: inherit
     with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
       frontend-validation-result: ${{ needs.frontend-validation.result }}
       playwright-e2e-live-result: ${{ needs.playwright-e2e-live.result }}
 
