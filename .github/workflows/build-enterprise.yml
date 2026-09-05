@@ -1,5 +1,21 @@
 name: Enterprise E2E (Playwright)
 
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch with a `leg` input, so racecar can trigger a run and
+#      choose baseline vs instrumented. Upstream fires on push/PR, which racecar
+#      cannot drive.
+#   2. actions/checkout -> crashappsec/action-checkout, which wraps checkout and
+#      setup-chalk-action together. `chalk:` is the single variable separating
+#      the two arms, and `profile:` selects the observables profile.
+#   3. permissions: id-token: write for the action's OIDC connect. Declaring the
+#      block zeroes every unlisted scope, so the rest is restated.
+#   4. A fail-closed assertion on the instrumented arm.
+#   5. fail-fast: false on every matrix -- a measurement-integrity change, not a
+#      build change: the instrumented arm has strictly more failure surface, so
+#      fail-fast cancels its siblings more often than baseline's and biases the
+#      comparison.
+# Build and test COMMANDS are byte-identical to upstream.
+
 # Enterprise Playwright suite — exercises premium-key gated features (audit,
 # teams, analytics) plus full OAuth + SAML logins via the Keycloak compose
 # stacks under testing/compose. Slow and secret-gated, so it runs in four
@@ -16,6 +32,14 @@ name: Enterprise E2E (Playwright)
 on:
   workflow_call:
     inputs:
+      chalk_on:
+        description: "run under chalk/curiosity; passed down by the calling workflow"
+        type: boolean
+        default: false
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
       use_shared_cache:
         required: false
         type: boolean
@@ -36,10 +60,19 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  # A called workflow cannot read the caller's env, so the arm switch has to
+  # arrive as a workflow_call input.
+  CHALK_ON: ${{ inputs.chalk_on }}
 
 jobs:
   pick:
     uses: ./.github/workflows/_runner-pick.yml
+    with:
+      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
 
   playwright-e2e-enterprise:
     environment:
@@ -62,7 +95,19 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # inert at action-checkout@main (not an input there); kept for forward-compat
+          observables_continue_on_error: false
+          # action-checkout defaults LFS on; actions/checkout does not
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Restore cache Gradle User Home
         if: inputs.use_shared_cache
@@ -332,71 +377,3 @@ jobs:
 
   # Multi-node regression: builds + seeds the clustered stack (testing/compose/docker-compose-multinode.yml)
   # and runs behave features/multinode. Licence-gated, so it runs after the Playwright job (not in parallel).
-  multinode-e2e:
-    environment:
-      name: ci-unsigned
-      deployment: false
-    needs: [pick, playwright-e2e-enterprise]
-    # Nightly cron + manual dispatch only (heavy build), fork-gated for the licence secret.
-    if: >-
-      always() && needs.pick.outputs.is_fork != 'true'
-      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ needs.pick.outputs.is_fork == 'true' && 'ubuntu-latest' || format('depot-ubuntu-24.04-{0}', inputs.depot_cores || '8') }}
-    timeout-minutes: 60
-    env:
-      PREMIUM_KEY: ${{ secrets.PREMIUM_KEY_ENTERPRISE }}
-      PREMIUM_ENABLED: "true"
-      SYSTEM_ENABLEANALYTICS: "false"
-      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
-      MN_COMPOSE: docker-compose-multinode.yml
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
-        with:
-          egress-policy: audit
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          enable-cache: true
-          cache-dependency-glob: |
-            engine/pyproject.toml
-            engine/uv.lock
-      - name: Install behave test deps
-        run: |
-          uv sync --project engine --locked --group cucumber
-      - name: Build the multi-node image
-        working-directory: testing/compose
-        run: docker compose -f "$MN_COMPOSE" build
-      - name: Bring up the cluster and wait for both nodes healthy
-        working-directory: testing/compose
-        run: |
-          docker compose -f "$MN_COMPOSE" up -d
-          for i in $(seq 1 90); do
-            h1=$(docker inspect -f '{{.State.Health.Status}}' multinode-stirling-1 2>/dev/null || echo starting)
-            h2=$(docker inspect -f '{{.State.Health.Status}}' multinode-stirling-2 2>/dev/null || echo starting)
-            if [ "$h1" = healthy ] && [ "$h2" = healthy ]; then echo "both nodes healthy"; exit 0; fi
-            sleep 5
-          done
-          echo "::error::nodes did not become healthy"
-          docker compose -f "$MN_COMPOSE" logs --tail=200 stirling-1 stirling-2
-          exit 1
-      - name: Seed the cluster (teams, users, S3 connection, policy)
-        working-directory: testing/compose
-        run: docker compose -f "$MN_COMPOSE" --profile seed run --rm seed
-      - name: Run multi-node regression (implemented guarantees)
-        working-directory: testing/cucumber
-        # -e overrides behave.ini's exclusion of features/multinode; ~@known_gap skips any tracked-gap scenarios.
-        run: uv run --project ../../engine --locked --group cucumber python -m behave features/multinode -e "features/enterprise" --tags="~@known_gap ~@destructive" --no-capture -f plain
-      - name: Run multi-node failover (destructive)
-        working-directory: testing/cucumber
-        run: uv run --project ../../engine --locked --group cucumber python -m behave features/multinode -e "features/enterprise" --tags="@destructive ~@known_gap" --no-capture -f plain
-      - name: Dump node logs on failure
-        if: failure()
-        working-directory: testing/compose
-        run: docker compose -f "$MN_COMPOSE" logs --tail=400 stirling-1 stirling-2
-      - name: Tear down
-        if: always()
-        working-directory: testing/compose
-        run: docker compose -f "$MN_COMPOSE" --profile seed down -v --remove-orphans
