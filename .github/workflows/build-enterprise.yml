@@ -69,10 +69,12 @@ env:
 
 jobs:
   pick:
+    # racecar: no `with:` here. _runner-pick.yml declares workflow_call with
+    # outputs only and no inputs, so passing chalk_on/profile made every run a
+    # startup_failure with zero jobs and no annotation. It classifies the trigger
+    # and does no checkout or build, so there is nothing to instrument. This
+    # matches upstream, which calls it with no inputs at all.
     uses: ./.github/workflows/_runner-pick.yml
-    with:
-      chalk_on: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
-      profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
 
   playwright-e2e-enterprise:
     environment:
