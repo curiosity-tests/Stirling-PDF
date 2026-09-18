@@ -87,31 +87,102 @@ jobs:
       generated-models: ${{ steps.changes.outputs.generated-models }}
       proprietary: ${{ steps.changes.outputs.proprietary }}
     steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
-        with:
-          egress-policy: audit
-      - name: Checkout repository
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c   # v2.21.0
+      with:
+        egress-policy: audit
+    - name: Checkout repository
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
           # inert at action-checkout@main (not an input there); kept for forward-compat
-          observables_continue_on_error: false
+        observables_continue_on_error: false
           # action-checkout defaults LFS on; actions/checkout does not
-          lfs: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+        lfs: false
+    - name: Check for file changes
+      uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d   # v4.0.3
+      id: changes
+      with:
+        filters: .github/config/.files.yaml
 
-      - name: Check for file changes
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        id: changes
-        with:
-          filters: .github/config/.files.yaml
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   gradle-cache-prime:
     needs: [files-changed]
     uses: ./.github/workflows/gradle-cache-prime.yml
@@ -265,14 +336,7 @@ jobs:
       contains(fromJSON('["success", "skipped"]'), needs.build.result) &&
       contains(fromJSON('["success", "skipped"]'), needs.check-generateOpenApiDocs.result) &&
       contains(fromJSON('["success", "skipped"]'), needs.check-licence.result)
-    needs:
-      [
-        files-changed,
-        build,
-        check-generateOpenApiDocs,
-        check-licence,
-        gradle-cache-prime,
-      ]
+    needs: [files-changed, build, check-generateOpenApiDocs, check-licence, gradle-cache-prime]
     permissions:
       contents: read
       packages: read
@@ -369,10 +433,10 @@ jobs:
   coverage-aggregate:
     if: always()
     needs:
-      - build
-      - playwright-e2e-live
-      - docker-compose-tests
-      - frontend-validation
+    - build
+    - playwright-e2e-live
+    - docker-compose-tests
+    - frontend-validation
     permissions:
       contents: read
       id-token: write
@@ -393,65 +457,65 @@ jobs:
     name: All checks passed
     if: always()
     needs:
-      - files-changed
-      - gradle-cache-prime
-      - build
-      - db-migration-test
-      - check-generateOpenApiDocs
-      - frontend-validation
-      - frontend-a11y
-      - playwright-e2e
-      - playwright-e2e-live
-      - playwright-e2e-enterprise
-      - check-licence
-      - docker-compose-tests
-      - test-build-docker-images
-      - tauri-build
-      - ai-engine
-      - generated-models
-      - pre-commit
-      - dependency-review
+    - files-changed
+    - gradle-cache-prime
+    - build
+    - db-migration-test
+    - check-generateOpenApiDocs
+    - frontend-validation
+    - frontend-a11y
+    - playwright-e2e
+    - playwright-e2e-live
+    - playwright-e2e-enterprise
+    - check-licence
+    - docker-compose-tests
+    - test-build-docker-images
+    - tauri-build
+    - ai-engine
+    - generated-models
+    - pre-commit
+    - dependency-review
     runs-on: ubuntu-latest
     steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
-        with:
-          egress-policy: audit
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c   # v2.21.0
+      with:
+        egress-policy: audit
 
-      - name: Verify every required job passed (or was legitimately skipped)
-        env:
-          RESULTS: |
-            files-changed=${{ needs.files-changed.result }}
-            gradle-cache-prime=${{ needs.gradle-cache-prime.result }}
-            build=${{ needs.build.result }}
-            db-migration-test=${{ needs.db-migration-test.result }}
-            check-generateOpenApiDocs=${{ needs.check-generateOpenApiDocs.result }}
-            frontend-validation=${{ needs.frontend-validation.result }}
-            frontend-a11y=${{ needs.frontend-a11y.result }}
-            playwright-e2e=${{ needs.playwright-e2e.result }}
-            playwright-e2e-live=${{ needs.playwright-e2e-live.result }}
-            playwright-e2e-enterprise=${{ needs.playwright-e2e-enterprise.result }}
-            check-licence=${{ needs.check-licence.result }}
-            docker-compose-tests=${{ needs.docker-compose-tests.result }}
-            test-build-docker-images=${{ needs.test-build-docker-images.result }}
-            tauri-build=${{ needs.tauri-build.result }}
-            ai-engine=${{ needs.ai-engine.result }}
-            generated-models=${{ needs.generated-models.result }}
-            pre-commit=${{ needs.pre-commit.result }}
-            dependency-review=${{ needs.dependency-review.result }}
-        run: |
-          ok=true
-          while IFS='=' read -r name result; do
-            [ -z "$name" ] && continue
-            case "$result" in
-              success|skipped) printf '  %-30s %s\n' "$name" "$result" ;;
-              *)               printf '✗ %-30s %s\n' "$name" "$result"; ok=false ;;
-            esac
-          done <<< "$RESULTS"
-          if [ "$ok" != "true" ]; then
-            echo ""
-            echo "One or more required checks failed or were cancelled."
-            exit 1
-          fi
+    - name: Verify every required job passed (or was legitimately skipped)
+      env:
+        RESULTS: |
+          files-changed=${{ needs.files-changed.result }}
+          gradle-cache-prime=${{ needs.gradle-cache-prime.result }}
+          build=${{ needs.build.result }}
+          db-migration-test=${{ needs.db-migration-test.result }}
+          check-generateOpenApiDocs=${{ needs.check-generateOpenApiDocs.result }}
+          frontend-validation=${{ needs.frontend-validation.result }}
+          frontend-a11y=${{ needs.frontend-a11y.result }}
+          playwright-e2e=${{ needs.playwright-e2e.result }}
+          playwright-e2e-live=${{ needs.playwright-e2e-live.result }}
+          playwright-e2e-enterprise=${{ needs.playwright-e2e-enterprise.result }}
+          check-licence=${{ needs.check-licence.result }}
+          docker-compose-tests=${{ needs.docker-compose-tests.result }}
+          test-build-docker-images=${{ needs.test-build-docker-images.result }}
+          tauri-build=${{ needs.tauri-build.result }}
+          ai-engine=${{ needs.ai-engine.result }}
+          generated-models=${{ needs.generated-models.result }}
+          pre-commit=${{ needs.pre-commit.result }}
+          dependency-review=${{ needs.dependency-review.result }}
+      run: |
+        ok=true
+        while IFS='=' read -r name result; do
+          [ -z "$name" ] && continue
+          case "$result" in
+            success|skipped) printf '  %-30s %s\n' "$name" "$result" ;;
+            *)               printf '✗ %-30s %s\n' "$name" "$result"; ok=false ;;
+          esac
+        done <<< "$RESULTS"
+        if [ "$ok" != "true" ]; then
           echo ""
-          echo "All required checks passed."
+          echo "One or more required checks failed or were cancelled."
+          exit 1
+        fi
+        echo ""
+        echo "All required checks passed."
